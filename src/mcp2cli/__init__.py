@@ -233,6 +233,23 @@ def _merge_stdin_flag_args(data, cmd, args, context: str):
     return merged
 
 
+def split_shell_command(command: str) -> list[str]:
+    """Split a shell-style command string into an argv list.
+
+    ``shlex.split`` defaults to POSIX rules, which treat backslash as an escape
+    and therefore mangle native Windows paths (``D:\\tools\\python.exe`` becomes
+    ``D:toolspython.exe``).  On Windows keep the backslashes and strip any
+    surrounding quotes instead.
+    """
+    if os.name == "nt":
+        parts = shlex.split(command, posix=False)
+        return [
+            p[1:-1] if len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'" else p
+            for p in parts
+        ]
+    return shlex.split(command)
+
+
 def _normalize_schema_type(t):
     """JSON Schema allows "type": ["integer", "null"] (array form). Reduce it
     to the single concrete type, dropping "null"; anything else passes through."""
@@ -522,7 +539,6 @@ def _ensure_utf8_output() -> None:
                 reconfigure(errors="backslashreplace")
             except Exception:
                 pass
-
 
 
 def _apply_head(data, n: int):
@@ -1060,8 +1076,6 @@ def _prompt_oauth_callback(attempts: int = 3) -> tuple[str, str, str | None]:
             if not remaining:
                 raise
             print(f"{exc} ({remaining} attempt(s) left)", file=sys.stderr)
-
-
 
 
 def _get_cached_redirect_uri(storage: "FileTokenStorage") -> str | None:
@@ -3553,7 +3567,7 @@ def run_mcp_stdio(
         from mcp import ClientSession
         from mcp.client.stdio import StdioServerParameters, stdio_client
 
-        parts = shlex.split(command_str)
+        parts = split_shell_command(command_str)
         env = {**os.environ, **env_vars}
         params = StdioServerParameters(command=parts[0], args=parts[1:], env=env)
 
@@ -4273,7 +4287,7 @@ def _run_session_daemon(config_json: str):
         if is_stdio:
             from mcp.client.stdio import StdioServerParameters, stdio_client
 
-            parts = shlex.split(source)
+            parts = split_shell_command(source)
             env = {**os.environ, **env_vars}
             params = StdioServerParameters(command=parts[0], args=parts[1:], env=env)
             async with stdio_client(params) as (read, write):
@@ -4578,7 +4592,7 @@ def _fetch_mcp_tools(
             from mcp import ClientSession
             from mcp.client.stdio import StdioServerParameters, stdio_client
 
-            parts = shlex.split(source)
+            parts = split_shell_command(source)
             env = {**os.environ, **env_vars}
             params = StdioServerParameters(command=parts[0], args=parts[1:], env=env)
             async with stdio_client(params) as (read, write):
