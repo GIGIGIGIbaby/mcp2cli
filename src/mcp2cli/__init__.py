@@ -277,6 +277,69 @@ def _collapse_nullable(schema: dict) -> dict:
     return {**concrete[0], **outer}
 
 
+def _union_branch_types(schema: dict) -> set[str]:
+    """Collect the JSON types an anyOf/oneOf union admits, recursing into
+    nested unions. A branch without a usable "type" (a bare const, a $ref)
+    counts as "other": it may accept non-numeric values."""
+    types: set[str] = set()
+    alternatives = schema.get("anyOf") or schema.get("oneOf") or []
+    if not isinstance(alternatives, list):
+        return types
+    for alt in alternatives:
+        if not isinstance(alt, dict):
+            types.add("other")
+            continue
+        t = alt.get("type")
+        if isinstance(t, list):
+            types.update(x for x in t if isinstance(x, str))
+        elif isinstance(t, str):
+            types.add(t)
+        elif alt.get("anyOf") or alt.get("oneOf"):
+            types |= _union_branch_types(alt)
+        else:
+            types.add("other")
+    return types
+
+
+def _union_prefer_numeric(schema: dict):
+    """Pick an argparse type for an anyOf/oneOf union with a numeric branch.
+
+    Returns None when no branch is integer/number, so callers fall back to
+    default logic. A purely numeric union gets int or float. A union that also
+    admits other values (the common MCP pattern
+    ``anyOf: [{type: string, const: ""}, {type: integer, minimum: 1}]``, or a
+    plain ``int | str``) gets a converter that sends the value as a number
+    when it parses as one and keeps the string otherwise, so ``--precision 6``
+    goes out as 6 while ``--id abc`` still goes out as "abc".
+    """
+    types = _union_branch_types(schema)
+    converters = []
+    if "integer" in types:
+        converters.append(int)
+    if "number" in types:
+        converters.append(float)
+    if not converters:
+        return None
+    keeps_string = bool(types - {"integer", "number", "null"})
+    if len(converters) == 1 and not keeps_string:
+        return converters[0]
+
+    def convert(value: str):
+        for conv in converters:
+            try:
+                return conv(value)
+            except ValueError:
+                pass
+        if keeps_string:
+            return value
+        raise ValueError(value)
+
+    convert.__name__ = "|".join(
+        [c.__name__ for c in converters] + (["str"] if keeps_string else [])
+    )
+    return convert
+
+
 def schema_type_to_python(schema: dict) -> tuple[type | None, str]:
     t = _normalize_schema_type(schema.get("type"))
     if t == "integer":
@@ -299,6 +362,13 @@ def schema_type_to_python(schema: dict) -> tuple[type | None, str]:
                 return int, ""
             if all(isinstance(v, (int, float)) for v in enum):
                 return float, ""
+    # No "type" but an anyOf/oneOf union with a numeric branch: send numbers
+    # as numbers (see _union_prefer_numeric). A top-level "type" constrains
+    # every branch, so it wins and is handled above.
+    if t is None and (schema.get("anyOf") is not None or schema.get("oneOf") is not None):
+        union_type = _union_prefer_numeric(schema)
+        if union_type is not None:
+            return union_type, ""
     return str, ""
 
 
