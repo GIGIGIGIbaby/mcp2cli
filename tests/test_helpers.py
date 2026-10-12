@@ -78,6 +78,53 @@ class TestSchemaTypeToPython:
         # bool is a subclass of int; don't misread a bool enum as int
         assert schema_type_to_python({"enum": [True, False]}) == (str, "")
 
+    # anyOf/oneOf unions with a numeric branch (#123)
+    def test_numeric_only_union(self):
+        assert schema_type_to_python(
+            {"anyOf": [{"type": "integer"}, {"type": "null"}, {"type": "integer", "minimum": 5}]}
+        ) == (int, "")
+        assert schema_type_to_python({"oneOf": [{"type": "number"}, {"type": "null"}]}) == (float, "")
+
+    def test_empty_string_or_integer_union(self):
+        py_type, suffix = schema_type_to_python(
+            {"anyOf": [{"type": "string", "const": ""}, {"type": "integer", "minimum": 1}]}
+        )
+        assert suffix == ""
+        assert py_type("6") == 6 and isinstance(py_type("6"), int)
+        assert py_type("") == ""
+
+    def test_string_or_integer_union_keeps_strings(self):
+        py_type, _ = schema_type_to_python({"anyOf": [{"type": "string"}, {"type": "integer"}]})
+        assert py_type("42") == 42
+        assert py_type("abc") == "abc"
+        assert py_type.__name__ == "int|str"
+
+    def test_string_or_number_union(self):
+        py_type, _ = schema_type_to_python({"oneOf": [{"type": "string"}, {"type": "number"}]})
+        assert py_type("2.5") == 2.5
+        assert py_type("x") == "x"
+
+    def test_integer_or_number_union(self):
+        py_type, _ = schema_type_to_python({"anyOf": [{"type": "integer"}, {"type": "number"}]})
+        assert py_type("3") == 3 and isinstance(py_type("3"), int)
+        assert py_type("3.5") == 3.5
+        with pytest.raises(ValueError):
+            py_type("abc")
+
+    def test_nested_union(self):
+        py_type, _ = schema_type_to_python(
+            {"anyOf": [{"anyOf": [{"type": "integer"}, {"type": "null"}]}, {"type": "null"}]}
+        )
+        assert py_type is int
+
+    def test_non_numeric_union_stays_str(self):
+        assert schema_type_to_python({"anyOf": [{"type": "string"}, {"type": "boolean"}]}) == (str, "")
+
+    def test_top_level_type_wins_over_union(self):
+        assert schema_type_to_python(
+            {"type": "string", "anyOf": [{"type": "integer"}, {"type": "string"}]}
+        ) == (str, "")
+
 
 class TestCoerceValue:
     def test_none(self):
@@ -605,7 +652,13 @@ class TestExtractMCPCommands:
         tools = [{"name": "t", "inputSchema": {"type": "object", "properties": {"x": prop}}}]
         p = extract_mcp_commands(tools)[0].params[0]
         assert p.schema == prop
-        assert p.python_type is str
+        if "type" in prop:
+            assert p.python_type is str  # a top-level "type" still wins
+        else:
+            # A wider union with a numeric branch sends numbers as numbers and
+            # keeps anything else as a string (#123).
+            assert p.python_type("7") == 7
+            assert p.python_type("abc") == "abc"
 
 
 class TestBuildArgparseReservedFlags:
@@ -624,6 +677,20 @@ class TestBuildArgparseReservedFlags:
         ]
         pre = argparse.ArgumentParser(add_help=False)
         return build_argparse(extract_mcp_commands(tools), pre)
+
+    def test_numeric_union_parses_to_number(self):
+        # #123: anyOf [{"type": "string", "const": ""}, {"type": "integer"}]
+        parser = self._build(
+            {
+                "precision": {
+                    "anyOf": [{"type": "string", "const": ""}, {"type": "integer", "minimum": 1}]
+                },
+                "id": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+            }
+        )
+        args = parser.parse_args(["weird", "--precision", "6", "--id", "abc"])
+        assert args.precision == 6 and isinstance(args.precision, int)
+        assert args.id == "abc"
 
     def test_help_property_does_not_brick_parser(self):
         parser = self._build({"help": {"type": "string"}})
